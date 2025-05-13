@@ -1,9 +1,9 @@
 # go-jwt-cracker
 Concurrent HS256 JWT token brute force cracker, inspired by https://github.com/lmammino/jwt-cracker
 
-This is realistically only effective to crack JWT with weak secrets. It also only currently works with HMAC-SHA256 signatures.
+This tool is realistically only effective to crack JWTs with weak secrets. It currently only supports HMAC-SHA256 (HS256) signatures.
 
-It should be slightly faster than it's inspiration, as it uses a new goroutine for each generated and compared hash. Could be made faster if it was generating secrets in more than one goroutine.
+It uses a worker pool (default: number of CPU cores) for efficient parallel brute-forcing. Progress, hash rate, and estimated time remaining (ETA) are displayed in real time.
 
 Feel free to create a pull request with an improvement or fix :smile:
 
@@ -20,6 +20,8 @@ Usage of go-jwt-cracker:
         A string that is always suffixed to the secret
   -token string
         The full HS256 jwt token to crack
+  -workers int
+        Number of worker goroutines (default: number of CPU cores)
 ```
 
 ## Example
@@ -40,16 +42,12 @@ Parsed JWT:
 
 There are 254313150 combinations to attempt
 Cracking JWT secret...
-Attempts: 100000
-Attempts: 200000
-Attempts: 300000
+[==================              ]  50% (127156575/254313150) 1234567 hashes/sec ETA: 0h01m23s
+[===================             ]  55% (139872232/254313150) 1240000 hashes/sec ETA: 0h01m00s
 ...
-Attempts: 184500000
-Attempts: 184600000
-Attempts: 184700000
+
 Found secret in 184776821 attempts: secret
 ```
 
-### Time spent
-- Intel Core i7-4790k @ 4.38GHz - around 4.5 minutes
-- Intel Xeon E3-1270 V2 @ 3.50GHz - around 15 minutes
+- The right side of the progress bar shows the number of hashes per second (hashes/sec) and the estimated time remaining (ETA).
+- The number of workers defaults to the number of CPU cores, but can be changed with the `-workers` option.

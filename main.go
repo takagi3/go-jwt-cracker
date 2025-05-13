@@ -11,8 +11,10 @@ import (
 	"flag"
 	"fmt"
 	"math/big"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 type jwtHeader struct {
@@ -56,37 +58,34 @@ func generateSignature(message, secret []byte) []byte {
 	return hasher.Sum(nil)
 }
 
-func generateSecrets(alphabet string, n int, wg *sync.WaitGroup, done chan struct{}) <-chan string {
+func generateSecrets(alphabet string, n int, jobs chan<- string, done <-chan struct{}) {
 	if n <= 0 {
-		return nil
+		close(jobs)
+		return
 	}
 
-	c := make(chan string)
-
-	wg.Add(1)
-	go func() {
-		defer close(c)
-		var helper func(string)
-		helper = func(input string) {
-			if len(input) == n {
-				return
-			}
+	var helper func(string)
+	helper = func(input string) {
+		if len(input) == n {
+			return
+		}
+		select {
+		case <-done:
+			return
+		default:
+		}
+		for _, char := range alphabet {
+			s := input + string(char)
 			select {
 			case <-done:
 				return
-			default:
+			case jobs <- s:
 			}
-			for _, char := range alphabet {
-				s := input + string(char)
-				c <- s
-				helper(s)
-			}
+			helper(s)
 		}
-		helper("")
-		wg.Done()
-	}()
-
-	return c
+	}
+	helper("")
+	close(jobs)
 }
 
 func main() {
@@ -95,6 +94,7 @@ func main() {
 	prefix := flag.String("prefix", "", "A string that is always prefixed to the secret")
 	suffix := flag.String("suffix", "", "A string that is always suffixed to the secret")
 	maxLength := flag.Int("maxlen", 12, "The max length of the string generated during the brute force")
+	workers := flag.Int("workers", runtime.NumCPU(), "Number of worker goroutines")
 	flag.Parse()
 
 	if *token == "" {
@@ -138,33 +138,89 @@ func main() {
 	fmt.Printf("There are %s combinations to attempt\nCracking JWT secret...\n", combinations.String())
 
 	done := make(chan struct{})
-	wg := &sync.WaitGroup{}
+	jobs := make(chan string, 1000)
+	var wg sync.WaitGroup
 	var found bool
 	var attempts uint64
-	for secret := range generateSecrets(*alphabet, *maxLength, wg, done) {
-		wg.Add(1)
-		go func(s string, i uint64) {
+	var mu sync.Mutex
+
+	// プログレスバー表示用ゴルーチン
+	stopProgress := make(chan struct{})
+	go func() {
+		barWidth := 40
+		var lastAttempts uint64
+		for {
 			select {
-			case <-done:
-				wg.Done()
+			case <-stopProgress:
 				return
 			default:
 			}
-			if bytes.Equal(parsed.signature, generateSignature(parsed.message, []byte(*prefix+s+*suffix))) {
-				fmt.Printf("Found secret in %d attempts: %s\n", attempts, *prefix+s+*suffix)
-				found = true
-				close(done)
+			mu.Lock()
+			progress := float64(attempts) / float64(combinations.Int64())
+			if progress > 1.0 {
+				progress = 1.0
 			}
-			wg.Done()
-		}(secret, attempts)
-
-		attempts++
-		if attempts%100000 == 0 {
-			fmt.Printf("Attempts: %d\n", attempts)
+			filled := int(progress * float64(barWidth))
+			bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+			percent := int(progress * 100)
+			hashesPerSec := attempts - lastAttempts
+			remaining := combinations.Uint64() - attempts
+			var etaStr string
+			if hashesPerSec > 0 {
+				etaSec := int(remaining / hashesPerSec)
+				h := etaSec / 3600
+				m := (etaSec % 3600) / 60
+				s := etaSec % 60
+				if h > 0 {
+					etaStr = fmt.Sprintf("ETA: %dh%02dm%02ds", h, m, s)
+				} else if m > 0 {
+					etaStr = fmt.Sprintf("ETA: %dm%02ds", m, s)
+				} else {
+					etaStr = fmt.Sprintf("ETA: %ds", s)
+				}
+			} else {
+				etaStr = "ETA: --"
+			}
+			fmt.Printf("\r[%s] %3d%% (%d/%s) %d hashes/sec %s", bar, percent, attempts, combinations.String(), hashesPerSec, etaStr)
+			lastAttempts = attempts
+			mu.Unlock()
+			runtime.Gosched()
+			time.Sleep(1 * time.Second)
 		}
+	}()
+
+	for i := 0; i < *workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for secret := range jobs {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				mu.Lock()
+				attempts++
+				mu.Unlock()
+				if bytes.Equal(parsed.signature, generateSignature(parsed.message, []byte(*prefix+secret+*suffix))) {
+					mu.Lock()
+					if !found {
+						fmt.Printf("\n\nFound secret in %d attempts: %s\n", attempts, *prefix+secret+*suffix)
+						found = true
+						close(done)
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}()
 	}
+
+	go generateSecrets(*alphabet, *maxLength, jobs, done)
+
 	wg.Wait()
+	close(stopProgress)
 	if !found {
-		fmt.Printf("No secret found in %d attempts\n", attempts)
+		fmt.Printf("\nNo secret found in %d attempts\n", attempts)
 	}
 }
